@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  hysteria2:
+    build: .
+    container_name: hysteria2-server
+    restart: unless-stopped
+    ports:
+      - "443:443/udp"
+    volumes:
+      - ./config.yaml:/etc/hysteria/config.yaml:ro
+      - ./certs:/etc/hysteria:ro
+      - ./logs:/var/log/hysteria
+    environment:
+      - TZ=UTC
+    network_mode: host

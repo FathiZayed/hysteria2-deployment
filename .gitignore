@@ -1,0 +1,26 @@
+# Environment variables and secrets
+.env
+*.bak
+hysteria2-credentials.txt
+
+# Certificates
+certs/*.key
+certs/*.crt
+
+# Logs
+logs/
+*.log
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
