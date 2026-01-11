@@ -24,6 +24,46 @@ INSTALL_DIR="/opt/hysteria2"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
+# **NEW: Port selection**
+echo -e "${CYAN}Port Configuration:${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo "Select a port for Hysteria2:"
+echo "  1) 443 (default, recommended)"
+echo "  2) 8443"
+echo "  3) 3000"
+echo "  4) 4433"
+echo "  5) Custom port"
+echo ""
+read -p "Enter your choice (1-5) [default: 1]: " port_choice
+
+case $port_choice in
+    2)
+        SERVER_PORT=8443
+        ;;
+    3)
+        SERVER_PORT=3000
+        ;;
+    4)
+        SERVER_PORT=4433
+        ;;
+    5)
+        read -p "Enter custom port number (1-65535): " custom_port
+        # Validate port number
+        if ! [[ "$custom_port" =~ ^[0-9]+$ ]] || [ "$custom_port" -lt 1 ] || [ "$custom_port" -gt 65535 ]; then
+            echo -e "${RED}✗ Invalid port number. Using default 443${NC}"
+            SERVER_PORT=443
+        else
+            SERVER_PORT=$custom_port
+        fi
+        ;;
+    *)
+        SERVER_PORT=443
+        ;;
+esac
+
+echo -e "${GREEN}✓ Selected port: $SERVER_PORT${NC}"
+echo ""
+
 # Update system
 echo -e "${YELLOW}[1/6] Updating system packages...${NC}"
 apt-get update -qq
@@ -37,7 +77,6 @@ if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}Installing Docker...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh || {
-        # Fallback: manual Docker installation for older Ubuntu
         echo -e "${YELLOW}Trying alternative Docker installation...${NC}"
         apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null
         apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
@@ -67,8 +106,9 @@ echo -e "${YELLOW}[3/6] Configuring firewall rules...${NC}"
 # Install iptables-persistent
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
 
-# Add firewall rules for Hysteria2 (UDP protocol)
-iptables -I INPUT -p udp --dport 443 -j ACCEPT
+# Add firewall rules for selected port (UDP)
+iptables -I INPUT -p udp --dport "$SERVER_PORT" -j ACCEPT
+# Also allow common related ports
 iptables -I INPUT -p udp --dport 8443 -j ACCEPT
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 iptables -I INPUT -p udp --dport 80 -j ACCEPT
@@ -90,10 +130,10 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# **FIX: Remove any existing cert files/directories before creating new ones**
+# Remove any existing cert files/directories before creating new ones
 rm -rf "$INSTALL_DIR/server.key" "$INSTALL_DIR/server.crt" 2>/dev/null || true
 
-# Generate self-signed certificate (ec key is faster than rsa)
+# Generate self-signed certificate
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
     -keyout "$INSTALL_DIR/server.key" \
     -out "$INSTALL_DIR/server.crt" \
@@ -104,7 +144,7 @@ openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 chmod 644 "$INSTALL_DIR/server.crt"
 chmod 600 "$INSTALL_DIR/server.key"
 
-# Verify certificates were created as files (not directories)
+# Verify certificates were created as files
 if [ ! -f "$INSTALL_DIR/server.key" ] || [ ! -f "$INSTALL_DIR/server.crt" ]; then
     echo -e "${RED}✗ Failed to create certificate files${NC}"
     exit 1
@@ -112,11 +152,11 @@ fi
 
 echo -e "${GREEN}✓ Credentials and certificates generated${NC}"
 
-# Create config.yaml
+# Create config.yaml with selected port
 echo -e "${YELLOW}[5/6] Updating configuration...${NC}"
 
 cat > "$INSTALL_DIR/config.yaml" << EOF
-listen: :443
+listen: :$SERVER_PORT
 
 tls:
   cert: $INSTALL_DIR/server.crt
@@ -146,7 +186,7 @@ EOF
 
 echo -e "${GREEN}✓ Configuration updated${NC}"
 
-# **FIX: Download Hysteria2 binary instead of using Docker image**
+# Download Hysteria2 binary
 echo -e "${YELLOW}[6/6] Deploying Hysteria2...${NC}"
 
 # Detect architecture
@@ -172,12 +212,12 @@ if [ "$(docker ps -aq -f name=hysteria2-server)" ]; then
     docker rm hysteria2-server > /dev/null 2>&1
 fi
 
-# **FIX: Use Alpine Linux with proper volume mounts for certificates**
+# Run container with selected port
 docker run -d \
     --name hysteria2-server \
     --restart unless-stopped \
     --privileged \
-    -p 443:443/udp \
+    -p "$SERVER_PORT:$SERVER_PORT/udp" \
     -v "$INSTALL_DIR/hysteria":/hysteria:ro \
     -v "$INSTALL_DIR/config.yaml":/etc/hysteria/config.yaml:ro \
     -v "$INSTALL_DIR/server.crt":/etc/hysteria/server.crt:ro \
@@ -205,7 +245,7 @@ cat > "$INSTALL_DIR/hysteria2-credentials.txt" << EOL
 Server Information:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Server IP:        $SERVER_IP
-  Port:             443 (UDP)
+  Port:             $SERVER_PORT (UDP)
   Protocol:         Hysteria2
   SNI:              bing.com
   ALPN:             h3
@@ -225,11 +265,11 @@ Masquerade:
 
 Client Configuration String (hysteria2://):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-hysteria2://${NEW_PASSWORD}@${SERVER_IP}:443/?sni=bing.com&insecure=1#Hysteria2
+hysteria2://${NEW_PASSWORD}@${SERVER_IP}:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2
 
 Client Configuration (YAML):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-server: ${SERVER_IP}:443
+server: ${SERVER_IP}:${SERVER_PORT}
 auth: ${NEW_PASSWORD}
 tls:
   sni: bing.com
@@ -258,7 +298,7 @@ echo ""
 echo -e "${CYAN}Server Information:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "  ${GREEN}Server IP:${NC}        ${MAGENTA}$SERVER_IP${NC}"
-echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}443 (UDP)${NC}"
+echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}$SERVER_PORT (UDP)${NC}"
 echo -e "  ${GREEN}Protocol:${NC}         ${MAGENTA}Hysteria2${NC}"
 echo -e "  ${GREEN}SNI:${NC}              ${MAGENTA}bing.com${NC}"
 echo ""
@@ -273,7 +313,7 @@ echo -e "  ${GREEN}Download:${NC}         ${MAGENTA}1 Gbps${NC}"
 echo ""
 echo -e "${CYAN}Client Configuration String:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}hysteria2://${NEW_PASSWORD}@${SERVER_IP}:443/?sni=bing.com&insecure=1#Hysteria2${NC}"
+echo -e "${GREEN}hysteria2://${NEW_PASSWORD}@${SERVER_IP}:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2${NC}"
 echo ""
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
