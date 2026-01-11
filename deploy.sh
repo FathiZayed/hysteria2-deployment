@@ -20,13 +20,17 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+INSTALL_DIR="/opt/hysteria2"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
 # Update system
 echo -e "${YELLOW}[1/6] Updating system packages...${NC}"
 apt-get update -qq
 
 # Install required packages
 echo -e "${YELLOW}[2/6] Installing required packages...${NC}"
-apt-get install -y curl openssl jq > /dev/null 2>&1
+apt-get install -y curl openssl jq wget > /dev/null 2>&1
 
 # Install Docker if not installed
 if ! command -v docker &> /dev/null; then
@@ -77,7 +81,7 @@ echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 # Generate new credentials and certificates
 echo -e "${YELLOW}[4/6] Generating credentials and SSL certificates...${NC}"
 
-# Generate random password (32 characters, alphanumeric only to avoid special chars)
+# Generate random password (32 characters)
 NEW_PASSWORD=$(openssl rand -hex 16)
 
 # Get server IP
@@ -86,36 +90,80 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# Create certs directory if it doesn't exist
-mkdir -p certs
+# **FIX: Remove any existing cert files/directories before creating new ones**
+rm -rf "$INSTALL_DIR/server.key" "$INSTALL_DIR/server.crt" 2>/dev/null || true
 
-# Generate self-signed certificate
+# Generate self-signed certificate (ec key is faster than rsa)
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout certs/server.key \
-    -out certs/server.crt \
+    -keyout "$INSTALL_DIR/server.key" \
+    -out "$INSTALL_DIR/server.crt" \
     -subj "/CN=bing.com" \
     -days 36500 > /dev/null 2>&1
 
-chmod 644 certs/server.crt
-chmod 600 certs/server.key
+# Set proper permissions
+chmod 644 "$INSTALL_DIR/server.crt"
+chmod 600 "$INSTALL_DIR/server.key"
 
-echo -e "${GREEN}✓ Credentials and certificates generated${NC}"
-
-# Update config.yaml
-echo -e "${YELLOW}[5/6] Updating configuration...${NC}"
-
-if [ ! -f "config.yaml" ]; then
-    echo -e "${RED}Error: config.yaml not found in current directory${NC}"
+# Verify certificates were created as files (not directories)
+if [ ! -f "$INSTALL_DIR/server.key" ] || [ ! -f "$INSTALL_DIR/server.crt" ]; then
+    echo -e "${RED}✗ Failed to create certificate files${NC}"
     exit 1
 fi
 
-# Backup original config
-cp config.yaml config.yaml.bak
+echo -e "${GREEN}✓ Credentials and certificates generated${NC}"
 
-# Update config with new password (using | as delimiter to avoid issues with / in password)
-sed -i "s|password: .*|password: $NEW_PASSWORD|g" config.yaml
+# Create config.yaml
+echo -e "${YELLOW}[5/6] Updating configuration...${NC}"
+
+cat > "$INSTALL_DIR/config.yaml" << EOF
+listen: :443
+
+tls:
+  cert: $INSTALL_DIR/server.crt
+  key: $INSTALL_DIR/server.key
+
+auth:
+  type: password
+  password: $NEW_PASSWORD
+
+masquerade:
+  type: http
+  urls:
+    - https://news.ycombinator.com/
+    - https://www.wikipedia.org/
+    - https://www.github.com/
+
+bandwidth:
+  up: 1 gbps
+  down: 1 gbps
+
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
+EOF
 
 echo -e "${GREEN}✓ Configuration updated${NC}"
+
+# **FIX: Download Hysteria2 binary instead of using Docker image**
+echo -e "${YELLOW}[6/6] Deploying Hysteria2...${NC}"
+
+# Detect architecture
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    BINARY_URL="https://github.com/apernet/hysteria/releases/download/app%2Fv2.4.4/hysteria-linux-amd64"
+elif [ "$ARCH" = "aarch64" ]; then
+    BINARY_URL="https://github.com/apernet/hysteria/releases/download/app%2Fv2.4.4/hysteria-linux-arm64"
+else
+    echo -e "${RED}✗ Unsupported architecture: $ARCH${NC}"
+    exit 1
+fi
+
+# Download binary
+echo "Downloading Hysteria2 binary for $ARCH..."
+wget -q -O "$INSTALL_DIR/hysteria" "$BINARY_URL"
+chmod +x "$INSTALL_DIR/hysteria"
 
 # Stop existing container if running
 if [ "$(docker ps -aq -f name=hysteria2-server)" ]; then
@@ -124,29 +172,32 @@ if [ "$(docker ps -aq -f name=hysteria2-server)" ]; then
     docker rm hysteria2-server > /dev/null 2>&1
 fi
 
-# Deploy container
-echo -e "${YELLOW}[6/6] Deploying Hysteria2 from GHCR...${NC}"
-
-# Pull latest image
-docker pull ghcr.io/fathizayed/hysteria2-deployment:latest > /dev/null 2>&1
-
-# Run container
+# **FIX: Use Alpine Linux with proper volume mounts for certificates**
 docker run -d \
     --name hysteria2-server \
     --restart unless-stopped \
-    --network host \
-    -v $(pwd)/config.yaml:/etc/hysteria/config.yaml:ro \
-    -v $(pwd)/certs:/etc/hysteria:ro \
-    -v $(pwd)/logs:/var/log/hysteria \
-    ghcr.io/fathizayed/hysteria2-deployment:latest
+    --privileged \
+    -p 443:443/udp \
+    -v "$INSTALL_DIR/hysteria":/hysteria:ro \
+    -v "$INSTALL_DIR/config.yaml":/etc/hysteria/config.yaml:ro \
+    -v "$INSTALL_DIR/server.crt":/etc/hysteria/server.crt:ro \
+    -v "$INSTALL_DIR/server.key":/etc/hysteria/server.key:ro \
+    alpine:latest \
+    /hysteria server -c /etc/hysteria/config.yaml > /dev/null 2>&1
 
 # Wait for container to start
 sleep 3
 
-echo -e "${GREEN}✓ Hysteria2 deployed successfully!${NC}"
+# Check if container is running
+if docker ps | grep -q hysteria2-server; then
+    echo -e "${GREEN}✓ Hysteria2 deployed successfully!${NC}"
+else
+    echo -e "${RED}✗ Container failed to start. Check logs with: docker logs hysteria2-server${NC}"
+    exit 1
+fi
 
 # Save credentials to file
-cat > hysteria2-credentials.txt << EOL
+cat > "$INSTALL_DIR/hysteria2-credentials.txt" << EOL
 ╔════════════════════════════════════════════════════════════════╗
 ║              HYSTERIA2 SERVER CREDENTIALS                      ║
 ╚════════════════════════════════════════════════════════════════╝
@@ -226,14 +277,14 @@ echo -e "${GREEN}hysteria2://${NEW_PASSWORD}@${SERVER_IP}:443/?sni=bing.com&inse
 echo ""
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}hysteria2-credentials.txt${NC}"
+echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}$INSTALL_DIR/hysteria2-credentials.txt${NC}"
 echo ""
 echo -e "${CYAN}Container Status:${NC}"
 docker ps --filter name=hysteria2-server --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo ""
 echo -e "${YELLOW}Useful Commands:${NC}"
 echo -e "  View logs:        ${GREEN}docker logs -f hysteria2-server${NC}"
-echo -e "  View credentials: ${GREEN}cat hysteria2-credentials.txt${NC}"
+echo -e "  View credentials: ${GREEN}cat $INSTALL_DIR/hysteria2-credentials.txt${NC}"
 echo -e "  Restart:          ${GREEN}docker restart hysteria2-server${NC}"
 echo -e "  Stop:             ${GREEN}docker stop hysteria2-server${NC}"
 echo ""

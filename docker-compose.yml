@@ -2,15 +2,29 @@ version: '3.8'
 
 services:
   hysteria2:
-    build: .
+    image: alpine:latest
     container_name: hysteria2-server
     restart: unless-stopped
+    privileged: true
     ports:
       - "443:443/udp"
     volumes:
+      # Mount the hysteria binary
+      - ./hysteria:/hysteria:ro
+      # Mount configuration file
       - ./config.yaml:/etc/hysteria/config.yaml:ro
-      - ./certs:/etc/hysteria:ro
+      # Mount SSL certificates (as files, not directories)
+      - ./server.crt:/etc/hysteria/server.crt:ro
+      - ./server.key:/etc/hysteria/server.key:ro
+      # Log directory
       - ./logs:/var/log/hysteria
     environment:
       - TZ=UTC
-    network_mode: host
+    command: /hysteria server -c /etc/hysteria/config.yaml
+    # Health check
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep -q '[/]hysteria' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

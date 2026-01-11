@@ -1,25 +1,21 @@
 FROM alpine:latest
 
-# Install dependencies
-RUN apk add --no-cache ca-certificates curl openssl
+# Install minimal dependencies
+RUN apk add --no-cache ca-certificates openssl
 
-# Download and install Hysteria2
-RUN HYSTERIA_VERSION=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")' | sed 's/app\///') && \
-    curl -Lo /usr/local/bin/hysteria https://github.com/apernet/hysteria/releases/download/app/v${HYSTERIA_VERSION}/hysteria-linux-amd64 && \
-    chmod +x /usr/local/bin/hysteria
-
-# Create directories
+# Create necessary directories
 RUN mkdir -p /etc/hysteria /var/log/hysteria
 
-# Copy configuration
-COPY config.yaml /etc/hysteria/config.yaml
-
-# Expose port
-EXPOSE 443/udp
-
-# Health check
+# Health check - verify process is running
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD hysteria version || exit 1
+    CMD ps aux | grep -q "[/]hysteria" || exit 1
 
-# Run Hysteria2
-CMD ["/usr/local/bin/hysteria", "server", "-c", "/etc/hysteria/config.yaml"]
+# Hysteria2 binary and config will be mounted via volumes
+# This image is used as a base with the binary injected via docker run -v
+
+# Run as non-root for security (optional, comment out if not needed)
+# RUN addgroup -g 1000 hysteria && adduser -D -u 1000 -G hysteria hysteria
+# USER hysteria
+
+# Default command - will be overridden by docker run
+ENTRYPOINT ["/hysteria"]

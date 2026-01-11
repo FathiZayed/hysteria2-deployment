@@ -27,7 +27,11 @@ fi
 if [ -d "$DEPLOY_DIR" ]; then
     echo "📂 Updating existing installation..."
     cd "$DEPLOY_DIR"
-    git pull
+    
+    # **FIX: Reset local changes and clean before pulling**
+    git reset --hard HEAD 2>/dev/null || true
+    git clean -fd 2>/dev/null || true
+    git pull origin main 2>/dev/null || true
 else
     echo "📥 Cloning repository..."
     git clone "$REPO_URL" "$DEPLOY_DIR"
@@ -44,3 +48,4 @@ echo "🔧 Running deployment script..."
 echo ""
 echo "✅ Deployment complete!"
 echo "📍 Installation directory: $DEPLOY_DIR"
+echo "📄 View credentials: cat $DEPLOY_DIR/hysteria2-credentials.txt"
