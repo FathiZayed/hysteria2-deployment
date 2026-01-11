@@ -32,13 +32,29 @@ apt-get install -y curl openssl jq > /dev/null 2>&1
 if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}Installing Docker...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
+    sh get-docker.sh || {
+        # Fallback: manual Docker installation for older Ubuntu
+        echo -e "${YELLOW}Trying alternative Docker installation...${NC}"
+        apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null
+        apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update -qq
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    }
     systemctl enable docker
     systemctl start docker
-    rm get-docker.sh
+    rm -f get-docker.sh
     echo -e "${GREEN}✓ Docker installed${NC}"
 else
     echo -e "${GREEN}✓ Docker already installed${NC}"
+fi
+
+# Verify Docker is working
+if ! docker --version &> /dev/null; then
+    echo -e "${RED}Docker installation failed. Please install manually.${NC}"
+    exit 1
 fi
 
 # Configure firewall
@@ -61,8 +77,8 @@ echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 # Generate new credentials and certificates
 echo -e "${YELLOW}[4/6] Generating credentials and SSL certificates...${NC}"
 
-# Generate random password (32 characters)
-NEW_PASSWORD=$(openssl rand -base64 24)
+# Generate random password (32 characters, alphanumeric only to avoid special chars)
+NEW_PASSWORD=$(openssl rand -hex 16)
 
 # Get server IP
 SERVER_IP=$(curl -s https://api.ipify.org)
@@ -96,8 +112,8 @@ fi
 # Backup original config
 cp config.yaml config.yaml.bak
 
-# Update config with new password
-sed -i "s/password: .*/password: $NEW_PASSWORD/g" config.yaml
+# Update config with new password (using | as delimiter to avoid issues with / in password)
+sed -i "s|password: .*|password: $NEW_PASSWORD|g" config.yaml
 
 echo -e "${GREEN}✓ Configuration updated${NC}"
 
