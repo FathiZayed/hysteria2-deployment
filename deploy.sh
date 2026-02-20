@@ -159,19 +159,18 @@ cat > "$INSTALL_DIR/config.yaml" << EOF
 listen: :$SERVER_PORT
 
 tls:
-  cert: $INSTALL_DIR/server.crt
-  key: $INSTALL_DIR/server.key
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
 
 auth:
   type: password
   password: $NEW_PASSWORD
 
 masquerade:
-  type: http
-  urls:
-    - https://news.ycombinator.com/
-    - https://www.wikipedia.org/
-    - https://www.github.com/
+  type: proxy
+  proxy:
+    url: https://news.ycombinator.com/
+    rewriteHost: true
 
 bandwidth:
   up: 1 gbps
