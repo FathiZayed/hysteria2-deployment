@@ -48,7 +48,6 @@ case $port_choice in
         ;;
     5)
         read -p "Enter custom port number (1-65535): " custom_port
-        # Validate port number
         if ! [[ "$custom_port" =~ ^[0-9]+$ ]] || [ "$custom_port" -lt 1 ] || [ "$custom_port" -gt 65535 ]; then
             echo -e "${RED}✗ Invalid port number. Using default 443${NC}"
             SERVER_PORT=443
@@ -65,11 +64,11 @@ echo -e "${GREEN}✓ Selected port: $SERVER_PORT${NC}"
 echo ""
 
 # Update system
-echo -e "${YELLOW}[1/6] Updating system packages...${NC}"
+echo -e "${YELLOW}[1/7] Updating system packages...${NC}"
 apt-get update -qq
 
 # Install required packages
-echo -e "${YELLOW}[2/6] Installing required packages...${NC}"
+echo -e "${YELLOW}[2/7] Installing required packages...${NC}"
 apt-get install -y curl openssl jq wget > /dev/null 2>&1
 
 # Install Docker if not installed
@@ -101,14 +100,13 @@ if ! docker --version &> /dev/null; then
 fi
 
 # Configure firewall
-echo -e "${YELLOW}[3/6] Configuring firewall rules...${NC}"
+echo -e "${YELLOW}[3/7] Configuring firewall rules...${NC}"
 
 # Install iptables-persistent
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
 
 # Add firewall rules for selected port (UDP)
 iptables -I INPUT -p udp --dport "$SERVER_PORT" -j ACCEPT
-# Also allow common related ports
 iptables -I INPUT -p udp --dport 8443 -j ACCEPT
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 iptables -I INPUT -p udp --dport 80 -j ACCEPT
@@ -118,17 +116,77 @@ netfilter-persistent save > /dev/null 2>&1
 
 echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 
+# Configure IPv6
+echo -e "${YELLOW}[4/7] Configuring IPv6 support...${NC}"
+
+# Enable IPv6 forwarding
+sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
+
+# Persist IPv6 forwarding across reboots
+if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+fi
+
+# Detect the default outbound network interface
+DEFAULT_IFACE=$(ip -6 route show default | awk '/default/ {print $5}' | head -1)
+if [ -z "$DEFAULT_IFACE" ]; then
+    DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
+fi
+
+# Add IPv6 MASQUERADE for host traffic
+ip6tables -t nat -A POSTROUTING -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || true
+
+# Enable IPv6 in Docker daemon
+DOCKER_DAEMON_FILE="/etc/docker/daemon.json"
+if [ -f "$DOCKER_DAEMON_FILE" ]; then
+    # Check if ipv6 is already configured
+    if ! grep -q '"ipv6"' "$DOCKER_DAEMON_FILE"; then
+        # Merge into existing daemon.json using python
+        python3 -c "
+import json
+with open('$DOCKER_DAEMON_FILE', 'r') as f:
+    d = json.load(f)
+d['ipv6'] = True
+d['fixed-cidr-v6'] = 'fd00::/80'
+with open('$DOCKER_DAEMON_FILE', 'w') as f:
+    json.dump(d, f, indent=2)
+"
+    fi
+else
+    cat > "$DOCKER_DAEMON_FILE" << 'EOF'
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "fd00::/80"
+}
+EOF
+fi
+
+# Restart Docker to apply IPv6 config
+systemctl restart docker
+sleep 2
+
+# Add IPv6 MASQUERADE for Docker container traffic (fd00::/80 range)
+ip6tables -t nat -A POSTROUTING -s fd00::/80 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || true
+
+# Save ip6tables rules
+netfilter-persistent save > /dev/null 2>&1
+
+echo -e "${GREEN}✓ IPv6 configured (forwarding + NAT + Docker IPv6 enabled)${NC}"
+echo -e "${GREEN}  Interface: $DEFAULT_IFACE${NC}"
+
 # Generate new credentials and certificates
-echo -e "${YELLOW}[4/6] Generating credentials and SSL certificates...${NC}"
+echo -e "${YELLOW}[5/7] Generating credentials and SSL certificates...${NC}"
 
 # Generate random password (32 characters)
 NEW_PASSWORD=$(openssl rand -hex 16)
 
-# Get server IP
+# Get server IPs
 SERVER_IP=$(curl -s https://api.ipify.org)
 if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
+
+SERVER_IPV6=$(ip -6 addr show scope global | awk '/inet6/{print $2}' | cut -d'/' -f1 | head -1)
 
 # Remove any existing cert files/directories before creating new ones
 rm -rf "$INSTALL_DIR/server.key" "$INSTALL_DIR/server.crt" 2>/dev/null || true
@@ -153,7 +211,7 @@ fi
 echo -e "${GREEN}✓ Credentials and certificates generated${NC}"
 
 # Create config.yaml with selected port
-echo -e "${YELLOW}[5/6] Updating configuration...${NC}"
+echo -e "${YELLOW}[6/7] Updating configuration...${NC}"
 
 cat > "$INSTALL_DIR/config.yaml" << EOF
 listen: :$SERVER_PORT
@@ -186,7 +244,7 @@ EOF
 echo -e "${GREEN}✓ Configuration updated${NC}"
 
 # Download Hysteria2 binary
-echo -e "${YELLOW}[6/6] Deploying Hysteria2...${NC}"
+echo -e "${YELLOW}[7/7] Deploying Hysteria2...${NC}"
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -243,7 +301,8 @@ cat > "$INSTALL_DIR/hysteria2-credentials.txt" << EOL
 
 Server Information:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Server IP:        $SERVER_IP
+  Server IP (IPv4): $SERVER_IP
+  Server IP (IPv6): ${SERVER_IPV6:-N/A}
   Port:             $SERVER_PORT (UDP)
   Protocol:         Hysteria2
   SNI:              bing.com
@@ -262,9 +321,13 @@ Masquerade:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   URL:              https://news.ycombinator.com/
 
-Client Configuration String (hysteria2://):
+Client Configuration String (IPv4):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 hysteria2://${NEW_PASSWORD}@${SERVER_IP}:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2
+
+Client Configuration String (IPv6):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+hysteria2://${NEW_PASSWORD}@[${SERVER_IPV6}]:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2-IPv6
 
 Client Configuration (YAML):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -286,6 +349,7 @@ Generated: $(date)
 
 ⚠️  IMPORTANT: Keep this file secure!
 💡 TIP: Use insecure=1 for self-signed certificates
+📝 NOTE: IPv6 address may change on reboot (Oracle Cloud dynamic IPv6)
 EOL
 
 # Display credentials
@@ -296,7 +360,8 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo -e "${CYAN}Server Information:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}Server IP:${NC}        ${MAGENTA}$SERVER_IP${NC}"
+echo -e "  ${GREEN}Server IP (IPv4):${NC} ${MAGENTA}$SERVER_IP${NC}"
+echo -e "  ${GREEN}Server IP (IPv6):${NC} ${MAGENTA}${SERVER_IPV6:-N/A}${NC}"
 echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}$SERVER_PORT (UDP)${NC}"
 echo -e "  ${GREEN}Protocol:${NC}         ${MAGENTA}Hysteria2${NC}"
 echo -e "  ${GREEN}SNI:${NC}              ${MAGENTA}bing.com${NC}"
@@ -305,15 +370,16 @@ echo -e "${CYAN}Authentication:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "  ${GREEN}Password:${NC}         ${MAGENTA}$NEW_PASSWORD${NC}"
 echo ""
-echo -e "${CYAN}Bandwidth:${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}Upload:${NC}           ${MAGENTA}1 Gbps${NC}"
-echo -e "  ${GREEN}Download:${NC}         ${MAGENTA}1 Gbps${NC}"
-echo ""
-echo -e "${CYAN}Client Configuration String:${NC}"
+echo -e "${CYAN}Client Configuration String (IPv4):${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}hysteria2://${NEW_PASSWORD}@${SERVER_IP}:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2${NC}"
 echo ""
+if [ -n "$SERVER_IPV6" ]; then
+echo -e "${CYAN}Client Configuration String (IPv6):${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}hysteria2://${NEW_PASSWORD}@[${SERVER_IPV6}]:${SERVER_PORT}/?sni=bing.com&insecure=1#Hysteria2-IPv6${NC}"
+echo ""
+fi
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}$INSTALL_DIR/hysteria2-credentials.txt${NC}"
@@ -329,4 +395,5 @@ echo -e "  Stop:             ${GREEN}docker stop hysteria2-server${NC}"
 echo ""
 echo -e "${RED}⚠️  SECURITY WARNING:${NC}"
 echo -e "${YELLOW}Keep 'hysteria2-credentials.txt' secure!${NC}"
+echo -e "${YELLOW}Oracle Cloud IPv6 is dynamic — it may change on reboot.${NC}"
 echo ""
